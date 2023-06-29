@@ -1,3 +1,4 @@
+from transformers.models.llama.configuration_llama import LlamaConfig
 from transformers.models.llama.modeling_llama import LlamaAttention, LlamaRotaryEmbedding, LlamaConfig, apply_rotary_pos_emb
 import math
 from typing import List, Optional, Tuple, Union
@@ -12,6 +13,11 @@ from kv_reduce.kv_manage import generate_mask, greedy_generate_mask
 
 class KvLlamaAttention(LlamaAttention):
     """Multi-headed attention from 'Attention Is All You Need' paper"""
+
+    def __init__(self, config: LlamaConfig):
+        super().__init__(config)
+        self.num_kv = -1
+        self.group = 1
 
     def forward(
         self,
@@ -55,10 +61,12 @@ class KvLlamaAttention(LlamaAttention):
                 f"Attention weights should be of size {(bsz, self.num_heads, q_len, kv_seq_len)}, but is"
                 f" {attn_weights.size()}")
 
-        attention_mask = greedy_generate_mask(attn_weights,
-                                              attention_mask,
-                                              attn_weights.shape[-1] // 4,
-                                              recent=10)
+        if self.num_kv != -1:
+            attention_mask = greedy_generate_mask(attn_weights,
+                                                  attention_mask,
+                                                  remain_kv=self.num_kv,
+                                                  recent=10,
+                                                  group=self.group)
 
         if attention_mask is not None:
             # if attention_mask.size() != (bsz, 1, q_len, kv_seq_len):

@@ -56,6 +56,11 @@ def main(args):
     tokenizer = AutoTokenizer.from_pretrained(args.model, use_fast=False)
 
     replace_modules(model, {LlamaAttention: KvLlamaAttention})
+    for module in model.modules():
+        if isinstance(module, KvLlamaAttention):
+            module.num_kv = args.kv
+            module.group = args.group
+    print(model)
 
     model = model.to(device)
     with autocast('cuda'):
@@ -74,7 +79,8 @@ if __name__ == "__main__":
                         type=str,
                         default="decapoda-research/llama-7b-hf",
                         help='base model name')
-
+    parser.add_argument('--kv', type=int, default=2048, help='base model name')
+    parser.add_argument('--group', type=int, default=1, help='base model name')
     args = parser.parse_args()
 
     main(args)

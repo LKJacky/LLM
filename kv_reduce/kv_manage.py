@@ -32,27 +32,39 @@ def generate_mask(attention: torch.Tensor, attention_mask: torch.Tensor,
 def greedy_generate_mask(attention: torch.Tensor,
                          attention_mask: torch.Tensor,
                          remain_kv: int,
-                         recent=10):
-    inf = attention_mask.min().item() * -1
-
-    mask = torch.zeros_like(attention)
-
-    attention = attention + attention_mask * -1
+                         recent=10,
+                         group=1):
+    min_inf = torch.finfo(attention.dtype).min
+    decay = 0.99
     B, He, Q, K = attention.shape
-    for i in range(Q):
-        num_kv = i
-        if num_kv > remain_kv:
-            attn = attention[:, :, i, :]  # B He K
-            attn[:, :, i - recent:i + 1] = torch.finfo(attn.dtype).min
-            drop = attn.argmin(dim=-1)  # B He
-            drop = drop.unsqueeze(-1).unsqueeze(-1)
-            drop = drop.repeat([1, 1, Q, 1])
-            drop[:, :, :i] = K - 1
-            attention = attention.scatter(-1, drop,
-                                          torch.finfo(attention.dtype).min)
-            mask.scatter_(-1, drop, torch.finfo(mask.dtype).min)
 
-    mask = torch.min(mask, attention_mask)
+    mask = attention_mask.clone().repeat([1, He, 1, 1])  # B 1 Q K
+    imp = torch.zeros([B, He, K],
+                      device=attention.device,
+                      dtype=attention.dtype)
+    kv_mask = torch.zeros_like(imp)
+
+    for i in range(Q):
+        # update importance
+        attn_i = attention[:, :, i, :]  # B He K
+        mask_i = mask[:, :, i, :]
+        attn_i = (attn_i + mask_i).softmax(dim=-1)
+        imp = imp * decay + attn_i * (1 - decay)
+        num_kv = int((mask_i[0][0] == 0).float().sum().item())
+
+        # update kv_mask
+        if num_kv > remain_kv and i % group == 0:
+            mask_i2 = mask_i.clone()
+            mask_i2[:, :, i - recent:i + 1] = min_inf
+            attn_i = attn_i + (-mask_i2)
+            index = attn_i.topk(num_kv - remain_kv, dim=-1, largest=False)[1]
+            kv_mask = torch.zeros_like(mask_i2)
+            kv_mask.scatter_(-1, index, min_inf)
+
+        # write back mask
+        mask_i = torch.min(kv_mask, mask_i)
+        mask[:, :, i, :] = mask_i
+
     return mask
 
 
@@ -64,5 +76,6 @@ if __name__ == '__main__':
     mask = greedy_generate_mask(attention,
                                 attention_mask,
                                 attention.shape[-1] // 2,
-                                recent=1)
+                                recent=1,
+                                group=2)
     print(mask)
