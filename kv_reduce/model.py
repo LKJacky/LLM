@@ -8,7 +8,7 @@ import torch.utils.checkpoint
 from torch import nn
 from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
 # from kv_manage import generate_mask
-from kv_reduce.kv_manage import generate_mask, greedy_generate_mask, KvManager
+from kv_reduce.kv_manage import generate_mask, greedy_generate_mask, KvManager,SimpleKvManager,KvManagerQuick
 
 
 class KvLlamaAttention(LlamaAttention):
@@ -114,7 +114,7 @@ class KvLlamaAttentionForGenerate(LlamaAttention):
 
     def __init__(self, config: LlamaConfig):
         super().__init__(config)
-        self.kv_manager = KvManager()
+        self.kv_manager = KvManagerQuick()
 
     def forward(
         self,
@@ -163,7 +163,9 @@ class KvLlamaAttentionForGenerate(LlamaAttention):
                 raise ValueError(
                     f"Attention mask should be of size {(bsz, 1, q_len, kv_seq_len)}, but is {attention_mask.size()}"
                 )
-            attn_weights = attn_weights + attention_mask
+            # attn_weights
+            if attention_mask.shape[-2] != 1:
+                attn_weights = attn_weights + attention_mask
             attn_weights = torch.max(
                 attn_weights,
                 torch.tensor(torch.finfo(attn_weights.dtype).min))
@@ -191,6 +193,12 @@ class KvLlamaAttentionForGenerate(LlamaAttention):
             attn_weights = None
 
         return attn_output, attn_weights, past_key_value
+
+    @classmethod
+    def convert_from(cls, module: LlamaAttention):
+        new_module = cls(module.config)
+        new_module.load_state_dict(module.state_dict())
+        return new_module
 
 
 if __name__ == '__main__':

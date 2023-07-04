@@ -3,6 +3,9 @@ import argparse
 import torch
 import torch.nn as nn
 from transformers import AutoTokenizer, AutoModelForCausalLM
+from kv_reduce.model import KvLlamaAttentionForGenerate
+from transformers.models.llama.modeling_llama import LlamaAttention
+from kv_reduce.kv_manage import replace_modules
 
 
 def get_llama(model):
@@ -50,17 +53,27 @@ if __name__ == '__main__':
         type=float,
         default=0.8,
         help='The value used to module the next token probabilities.')
-
+    parser.add_argument('--kv', type=int, default=2048, help='base model name')
+    parser.add_argument('--group', type=int, default=1, help='base model name')
     args = parser.parse_args()
 
     DEV = 'cuda:0'
-    model = AutoModelForCausalLM.from_pretrained(args.model)
+    from transformers import LlamaForCausalLM
+    model: LlamaForCausalLM = AutoModelForCausalLM.from_pretrained(args.model)
     tokenizer = AutoTokenizer.from_pretrained(args.model, use_fast=False)
 
     model.eval()
 
+
+    replace_modules(model, {LlamaAttention: KvLlamaAttentionForGenerate})
+    for module in model.modules():
+        if isinstance(module, KvLlamaAttentionForGenerate):
+            module.kv_manager.reset(10, 10)
+    print(model)
+
     model.to(DEV)
     input_ids = tokenizer.encode(args.text, return_tensors="pt").to(DEV)
+
 
     with torch.no_grad():
         generated_ids = model.generate(
@@ -72,9 +85,14 @@ if __name__ == '__main__':
             temperature=args.temperature,
         )
 
+    for module in model.modules():
+        if isinstance(module, KvLlamaAttentionForGenerate):
+            module.kv_manager.reset(args.kv, args.group)
+
     import time
     torch.cuda.synchronize()
     t0 = time.time()
+
     with torch.no_grad():
         generated_ids = model.generate(
             input_ids,
