@@ -8,7 +8,7 @@ import torch.utils.checkpoint
 from torch import nn
 from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
 # from kv_manage import generate_mask
-from kv_reduce.kv_manage import generate_mask, greedy_generate_mask, KvManager,SimpleKvManager,KvManagerQuick
+from kv_reduce.kv_manage import generate_mask, greedy_generate_mask, KvManager, SimpleKvManager, KvManagerQuick
 
 
 class KvLlamaAttention(LlamaAttention):

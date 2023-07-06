@@ -161,22 +161,47 @@ class KvManager:
         self.passed_kv += N
         return past_key_value
 
+    def step_encoding(
+        self,
+        attention: torch.Tensor,
+        attention_mask: torch.Tensor,
+    ):
+        group = self.group
+        remain_kv = self.num_kv
+        recent = self.recent
 
-def compute_imp(past_imp: Tensor, new_imps: List[Tensor]):
-    new_imps.insert(0, past_imp)
-    B, He, N, _ = past_imp.shape
-    new_imps = [imp.transpose(-1, 0) for imp in new_imps]  # KV He N B
-    # KV = new_imps[-1].shape[-1]  # B He N KV
-    # imps = [
-    #     F.pad(imp, (0, KV - imp.shape[-1]), value=0).unsqueeze(-1)
-    #     for imp in new_imps
-    # ]
-    imp = torch.nn.utils.rnn.pad_sequence(new_imps,
-                                          batch_first=False,
-                                          padding_value=0)  # KV L He N B
-    imp = imp.mean(dim=1).transpose(0, -1)
+        min_inf = torch.finfo(attention.dtype).min
+        B, He, Q, K = attention.shape
 
-    return imp
+        mask = attention_mask.clone().repeat([1, He, 1, 1])  # B 1 Q K
+        imp = torch.zeros([B, He, K],
+                          device=attention.device,
+                          dtype=attention.dtype)
+        kv_mask = torch.zeros_like(imp)
+
+        for i in range(Q):
+            # update importance
+            attn_i = attention[:, :, i, :]  # B He K
+            mask_i = mask[:, :, i, :]
+            attn_i = (attn_i + mask_i).softmax(dim=-1)
+            imp = imp + attn_i
+            num_kv = int((mask_i[0][0] == 0).float().sum().item())
+            # if i%group==0:
+
+            # update kv_mask
+            if num_kv > remain_kv and i % group == 0:
+                mask_i2 = mask_i.clone()
+                mask_i2[:, :, i - recent:i + 1] = min_inf
+                imp = imp + (-mask_i2)
+                index = imp.topk(num_kv - remain_kv, dim=-1, largest=False)[1]
+                kv_mask = torch.zeros_like(mask_i2)
+                kv_mask.scatter_(-1, index, min_inf)
+
+            # write back mask
+            mask_i = torch.min(kv_mask, mask_i)
+            mask[:, :, i, :] = mask_i
+
+        return mask
 
 
 class KvManagerQuick(KvManager):
@@ -188,6 +213,17 @@ class KvManagerQuick(KvManager):
     @torch.no_grad()
     def step(self, attn_weights: Tensor, past_key_value: Tuple[Tensor,
                                                                Tensor]):
+
+        def compute_imp(past_imp: Tensor, new_imps: List[Tensor]):
+            new_imps.insert(0, past_imp)
+            new_imps = [imp.transpose(-1, 0) for imp in new_imps]  # KV He N B
+            imp = torch.nn.utils.rnn.pad_sequence(
+                new_imps, batch_first=False, padding_value=0)  # KV L He N B
+            imp = imp.sum(dim=1) / (imp != 0).float().sum(dim=1)
+            imp = imp.transpose(0, -1)
+
+            return imp
+
         max_inf = torch.finfo(attn_weights.dtype).max
         B, He, N, _ = attn_weights.shape
         # # assert N == 1
@@ -200,7 +236,6 @@ class KvManagerQuick(KvManager):
                 self.imp_list = []
             else:
                 self.imp_list.append(attn_weights)
-            # self.imp = attn_update(attn_weights, self.imp, self.decay)
         num_kv = past_key_value[0].shape[-2]
         if past_key_value is not None and num_kv > self.num_kv and self.passed_kv % self.group == 0:
             imp = self.imp.clone()
