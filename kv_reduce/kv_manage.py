@@ -206,40 +206,61 @@ class KvManager:
 
 class KvManagerQuick(KvManager):
 
-    def __init__(self, num_kv=10, group=1, decay=0.99, recent=10) -> None:
+    def __init__(self,
+                 num_kv=10,
+                 group=1,
+                 decay=0.99,
+                 recent=10,
+                 only_one_head=False) -> None:
         super().__init__(num_kv, group, decay, recent)
+        self.only_one_head = only_one_head
         self.imp_list = []
 
     @torch.no_grad()
-    def step(self, attn_weights: Tensor, past_key_value: Tuple[Tensor,
-                                                               Tensor]):
+    def step(self, attn_weights: Tensor, past_key_value: Tuple[Tensor, Tensor],
+             atten_mask: Tensor):
+        # print("pre\t", past_key_value[0].shape)
 
         def compute_imp(past_imp: Tensor, new_imps: List[Tensor]):
-            new_imps.insert(0, past_imp)
-            new_imps = [imp.transpose(-1, 0) for imp in new_imps]  # KV He N B
-            imp = torch.nn.utils.rnn.pad_sequence(
-                new_imps, batch_first=False, padding_value=0)  # KV L He N B
-            imp = imp.sum(dim=1) / (imp != 0).float().sum(dim=1)
-            imp = imp.transpose(0, -1)
+            if len(new_imps) == 0:
+                return past_imp
+            else:
+                new_imps.insert(0, past_imp)  # B He 1 KV
+                new_imps = [imp.transpose(-1, 0)
+                            for imp in new_imps]  # KV He N B
+                imp = torch.nn.utils.rnn.pad_sequence(
+                    new_imps, batch_first=False,
+                    padding_value=0)  # KV L He N B
+                imp = imp.sum(dim=1) / (imp != 0).float().sum(dim=1)
+                imp = imp.transpose(0, -1)
+                return imp
 
-            return imp
+        if self.only_one_head:
+            He = attn_weights.shape[1]
+            attn_weights = attn_weights.mean(dim=1, keepdim=True)
+            attn_weights = attn_weights.repeat([1, He, 1, 1])
 
-        max_inf = torch.finfo(attn_weights.dtype).max
         B, He, N, _ = attn_weights.shape
         # # assert N == 1
+        if N != 1:
+            sum = attn_weights.sum(dim=2, keepdim=True)
+            num = (atten_mask == 0).float().sum(dim=2, keepdim=True)
+            attn_weights = sum / num
         if self.imp is None:
-            self.imp = attn_weights.mean(dim=2,
-                                         keepdim=True) * (1 - self.decay)
+            self.imp = attn_weights
         else:
-            if self.passed_kv % self.group == 0:
-                self.imp = compute_imp(self.imp, self.imp_list)
-                self.imp_list = []
-            else:
-                self.imp_list.append(attn_weights)
+            self.imp_list.append(attn_weights)
+
         num_kv = past_key_value[0].shape[-2]
-        if past_key_value is not None and num_kv > self.num_kv and self.passed_kv % self.group == 0:
+
+        if (num_kv > self.num_kv and self.passed_kv % self.group
+                == self.group - 1) or (num_kv >= self.num_kv + self.group):
+            max_inf = torch.finfo(attn_weights.dtype).max
+            self.imp = compute_imp(self.imp, self.imp_list)
+            self.imp_list = []
+
             imp = self.imp.clone()
-            imp[-self.recent:] = max_inf
+            imp[..., -self.recent:] = max_inf
             index: torch.Tensor = torch.topk(imp,
                                              self.num_kv,
                                              dim=-1,
@@ -253,6 +274,8 @@ class KvManagerQuick(KvManager):
                 past_key_value[0].gather(-2, index),
                 past_key_value[1].gather(-2, index),
             )
+            # print("after\t", past_key_value[0].shape)
+
         self.passed_kv += N
         return past_key_value
 
